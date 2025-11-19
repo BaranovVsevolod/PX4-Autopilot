@@ -81,11 +81,13 @@ protected:
 private:
 	perf_counter_t	_cycle_perf;
 	perf_counter_t _comms_errors;
+	int _continuous_failure_count{0};
+	int errors_b4_reset = 2;
 
 	enum class STATE : uint8_t {
 		CONFIGURE,
 		INIT,
-		WAIT_FOR_OSC,
+		//WAIT_FOR_OSC,
 		RUNNING
 	} state{STATE::CONFIGURE};
 
@@ -181,9 +183,9 @@ void PCA9685Wrapper::Run()
 	}
 
 	int ret;
-
 	switch (state) {
 	case STATE::CONFIGURE:
+		ScheduleClear();
 		ret = pca9685->reset();
 		ret |= pca9685->configure();
 
@@ -198,27 +200,22 @@ void PCA9685Wrapper::Run()
 		updateParams();
 		ret = pca9685->updateFreq(param_pwm_freq);
 		ret |= pca9685->wake();
+
 		if (ret == PX4_OK) {
 			previous_pwm_freq = param_pwm_freq;
 			previous_schd_rate = param_schd_rate;
-			state = STATE::WAIT_FOR_OSC;
-			ScheduleDelayed(500);
+			state = STATE::RUNNING;
+			ScheduleOnInterval(1000000 / param_schd_rate, 0);
 		}else{
+			perf_count(_comms_errors);
 			state = STATE::CONFIGURE;
 			ScheduleNow();
 		}
 
 		break;
 
-	case STATE::WAIT_FOR_OSC: {
-			state = STATE::RUNNING;
-			ScheduleOnInterval(1000000 / param_schd_rate, 0);
-		}
-		break;
-
 	case STATE::RUNNING:
 		perf_begin(_cycle_perf);
-
 		_mixing_output.update();
 
 		// check for parameter updates
@@ -232,24 +229,39 @@ void PCA9685Wrapper::Run()
 
 			// apply param updates
 			if ((float)fabs(previous_pwm_freq - param_pwm_freq) > 0.01f) {
-				previous_pwm_freq = param_pwm_freq;
 
 				ScheduleClear();
-
 				ret = pca9685->sleep();
 				ret |= pca9685->updateFreq(param_pwm_freq);
 				ret |= pca9685->wake();
 
-				if(ret != PX4_OK) {
-					perf_count(_comms_errors);
-					PX4_INFO("Failed to update PCA9685 PWM frequency");
+				if(pca9685->sanity_check() != PX4_OK){
+					PX4_ERR("PCA9685 in unconsistent state, will reconfigure");
+					state = STATE::CONFIGURE;
+					ScheduleNow();
+					break;
 				}
 
+				if(ret != PX4_OK) {
+					perf_count(_comms_errors);
+					_continuous_failure_count++;
+
+					if(_continuous_failure_count >= errors_b4_reset ){
+						state = STATE::CONFIGURE;
+						_continuous_failure_count = 0;
+						PX4_ERR("Too many continuous failures, reconfiguring PCA9685");
+					}
+
+					ScheduleNow();
+					break;
+				}
+
+				_continuous_failure_count = 0;
 				// update of PWM freq will always trigger scheduling change
 				previous_schd_rate = param_schd_rate;
+				previous_pwm_freq = param_pwm_freq;
 
-				state = STATE::WAIT_FOR_OSC;
-				ScheduleDelayed(500);
+				ScheduleNow();
 
 			} else if ((float)fabs(previous_schd_rate - param_schd_rate) > 0.01f) {
 				// case when PWM freq not changed but scheduling rate does

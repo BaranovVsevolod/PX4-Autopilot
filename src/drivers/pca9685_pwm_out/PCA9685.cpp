@@ -68,49 +68,38 @@ int PCA9685::configure(){
 	buf[1] = PCA9685_DEFAULT_MODE1_CFG | PCA9685_MODE1_SLEEP_MASK;  // put into sleep mode
 	int ret = transfer(buf, 2, nullptr, 0);
 
-	if (OK != ret) {
-		PX4_ERR("PCA9685 configure fail: transfer returned %d", ret);
-		return ret;
-	}
-
 #ifdef CONFIG_PCA9685_USE_EXTERNAL_CRYSTAL
 	buf[1] = PCA9685_DEFAULT_MODE1_CFG | PCA9685_MODE1_SLEEP_MASK | PCA9685_MODE1_EXTCLK_MASK;
-	ret = transfer(buf, 2, nullptr, 0); // enable EXTCLK if possible
-
-	if (OK != ret) {
-		PX4_ERR("PCA9685 configure fail: transfer returned %d", ret);
-		return ret;
-	}
-
+	ret |= transfer(buf, 2, nullptr, 0); // enable EXTCLK if possible
 #endif
 
 	buf[0] = PCA9685_REG_MODE2;
 	buf[1] = PCA9685_DEFAULT_MODE2_CFG;
-	ret = transfer(buf, 2, nullptr, 0);
+	ret |= transfer(buf, 2, nullptr, 0);
 
 	if (OK != ret) {
 		PX4_ERR("PCA9685 configure fail: transfer returned %d", ret);
-		return ret;
+	}
+
+	return ret;
+}
+
+int PCA9685::sanity_check(){
+	uint8_t send_buf = PCA9685_REG_MODE1;
+	uint8_t recv_buf;
+
+	int ret = transfer(&send_buf, 1, &recv_buf, 1);
+	if (OK != ret || recv_buf != PCA9685_DEFAULT_MODE1_CFG ) {
+		return PX4_ERROR;
+	}
+
+	send_buf = PCA9685_REG_MODE2;
+	ret = transfer(&send_buf, 1, &recv_buf, 1);
+	if (OK != ret || recv_buf != PCA9685_DEFAULT_MODE2_CFG ) {
+		return PX4_ERROR;
 	}
 
 	return PX4_OK;
-}
-
-int PCA9685::updatePWM(const uint16_t *outputs, unsigned num_outputs)
-{
-	if (num_outputs > PCA9685_PWM_CHANNEL_COUNT) {
-		num_outputs = PCA9685_PWM_CHANNEL_COUNT;
-		PX4_DEBUG("PCA9685 can only drive up to 16 channels");
-	}
-
-	uint16_t out[PCA9685_PWM_CHANNEL_COUNT];
-	memcpy(out, outputs, sizeof(uint16_t) * num_outputs);
-
-	for (unsigned i = 0; i < num_outputs; ++i) {
-		out[i] = calcRawFromPulse(out[i]);
-	}
-
-	return writePWM(0, out, num_outputs);
 }
 
 int PCA9685::updateFreq(float freq)
@@ -161,28 +150,38 @@ int PCA9685::sleep()
 
 int PCA9685::wake()
 {
-	uint8_t buf[2] = {
-		PCA9685_REG_MODE1,
-		PCA9685_DEFAULT_MODE1_CFG
-	};
-	return transfer(buf, 2, nullptr, 0);
-}
+	uint8_t send_buf[2];
+	send_buf[0] = PCA9685_REG_MODE1;
+	uint8_t recv_buf;
 
-int PCA9685::doRestart()
-{
-	uint8_t buf[2] = {
-		PCA9685_REG_MODE1,
-		PCA9685_DEFAULT_MODE1_CFG | PCA9685_MODE1_RESTART_MASK
-	};
-	return transfer(buf, 2, nullptr, 0);
-}
+	int ret = transfer(&send_buf[0], 1, &recv_buf, 1);
 
+	if(recv_buf & (1u << 7)){ // Check if reset bit is set
+		send_buf[1] = recv_buf & ~(PCA9685_MODE1_SLEEP_MASK | PCA9685_MODE1_RESTART_MASK); // Clear sleep bit and restart bit
+		ret |= transfer(&send_buf[0], 2, nullptr, 0);
+		px4_usleep(500); // wait for oscillator to stabilize
+		send_buf[1] |= 0x80; // Set restart bit
+		ret |= transfer(&send_buf[0], 2, nullptr, 0);
+
+	}else{
+		send_buf[1] = recv_buf & ~PCA9685_MODE1_SLEEP_MASK; // Clear sleep bit
+		ret |= transfer(&send_buf[0], 2, nullptr, 0);
+	}
+
+	ret |= transfer(&send_buf[0], 1, &recv_buf, 1);
+
+	if(ret != PX4_OK ||recv_buf & (1u << 7) || recv_buf & (1u << 4)){
+		PX4_ERR("WAKE FAILED: Ret: %d MODE1 REG after wake: %d \n", ret, recv_buf);
+		return PX4_ERROR;
+	}
+
+	return ret;
+}
 
 int PCA9685::reset()
 {
 	uint8_t buf[2] = { 0x00, 0x06 };
 	int ret = transfer(buf, 2, nullptr, 0);
-	PX4_INFO("PCA9685 reset %d \n", ret);
 	return ret;
 }
 
