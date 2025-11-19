@@ -148,14 +148,9 @@ public:
 	int configure();
 
 	/*
-	* Reset PCA9685 device to power-up state
-	*/
-	int reset();
-
-	/*
 	* Verfy whether the registers of PCA9685 are in a consistent state
 	*/
-	int sanity_check();
+	int registers_check();
 
 protected:
 	int probe() override;

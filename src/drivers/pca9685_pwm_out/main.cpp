@@ -81,15 +81,13 @@ protected:
 private:
 	perf_counter_t	_cycle_perf;
 	perf_counter_t _comms_errors;
-	int _continuous_failure_count{0};
-	int errors_b4_reset = 2;
+	perf_counter_t _registers_invalid;
 
 	enum class STATE : uint8_t {
 		CONFIGURE,
 		INIT,
-		//WAIT_FOR_OSC,
 		RUNNING
-	} state{STATE::CONFIGURE};
+	} _state{STATE::CONFIGURE};
 
 	PCA9685 *pca9685 = nullptr;
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
@@ -111,7 +109,8 @@ private:
 PCA9685Wrapper::PCA9685Wrapper() :
 	OutputModuleInterface(MODULE_NAME, px4::wq_configurations::hp_default),
 	_cycle_perf(perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")),
-	_comms_errors(perf_alloc(PC_COUNT, MODULE_NAME": comms errors"))
+	_comms_errors(perf_alloc(PC_COUNT, MODULE_NAME": comms errors")),
+	_registers_invalid(perf_alloc(PC_COUNT, MODULE_NAME": registers invalid"))
 {
 }
 
@@ -125,6 +124,7 @@ PCA9685Wrapper::~PCA9685Wrapper()
 
 	perf_free(_cycle_perf);
 	perf_free(_comms_errors);
+	perf_free(_registers_invalid);
 }
 
 int PCA9685Wrapper::init()
@@ -145,7 +145,7 @@ int PCA9685Wrapper::init()
 bool PCA9685Wrapper::updateOutputs(uint16_t *outputs, unsigned num_outputs,
 				   unsigned num_control_groups_updated)
 {
-	if (state != STATE::RUNNING) { return false; }
+	if (_state != STATE::RUNNING) { return false; }
 
 	uint16_t low_level_outputs[PCA9685_PWM_CHANNEL_COUNT] = {};
 	num_outputs = num_outputs > PCA9685_PWM_CHANNEL_COUNT ? PCA9685_PWM_CHANNEL_COUNT : num_outputs;
@@ -160,6 +160,7 @@ bool PCA9685Wrapper::updateOutputs(uint16_t *outputs, unsigned num_outputs,
 	}
 
 	if (pca9685->updateRAW(low_level_outputs, num_outputs) != PX4_OK) {
+		perf_count(_comms_errors);
 		PX4_ERR("Failed to write PWM to PCA9685");
 		return false;
 	}
@@ -183,14 +184,16 @@ void PCA9685Wrapper::Run()
 	}
 
 	int ret;
-	switch (state) {
+
+	switch (_state) {
 	case STATE::CONFIGURE:
-		ScheduleClear();
-		ret = pca9685->reset();
 		ret |= pca9685->configure();
 
-		if(ret == PX4_OK) {
-			state = STATE::INIT;
+		if (ret == PX4_OK) {
+			_state = STATE::INIT;
+
+		} else {
+			perf_count(_comms_errors);
 		}
 
 		ScheduleNow();
@@ -204,11 +207,12 @@ void PCA9685Wrapper::Run()
 		if (ret == PX4_OK) {
 			previous_pwm_freq = param_pwm_freq;
 			previous_schd_rate = param_schd_rate;
-			state = STATE::RUNNING;
+			_state = STATE::RUNNING;
 			ScheduleOnInterval(1000000 / param_schd_rate, 0);
-		}else{
+
+		} else {
 			perf_count(_comms_errors);
-			state = STATE::CONFIGURE;
+			_state = STATE::CONFIGURE;
 			ScheduleNow();
 		}
 
@@ -235,28 +239,10 @@ void PCA9685Wrapper::Run()
 				ret |= pca9685->updateFreq(param_pwm_freq);
 				ret |= pca9685->wake();
 
-				if(pca9685->sanity_check() != PX4_OK){
-					PX4_ERR("PCA9685 in unconsistent state, will reconfigure");
-					state = STATE::CONFIGURE;
-					ScheduleNow();
-					break;
-				}
-
-				if(ret != PX4_OK) {
+				if (ret != PX4_OK) {
 					perf_count(_comms_errors);
-					_continuous_failure_count++;
-
-					if(_continuous_failure_count >= errors_b4_reset ){
-						state = STATE::CONFIGURE;
-						_continuous_failure_count = 0;
-						PX4_ERR("Too many continuous failures, reconfiguring PCA9685");
-					}
-
-					ScheduleNow();
-					break;
 				}
 
-				_continuous_failure_count = 0;
 				// update of PWM freq will always trigger scheduling change
 				previous_schd_rate = param_schd_rate;
 				previous_pwm_freq = param_pwm_freq;
@@ -269,6 +255,14 @@ void PCA9685Wrapper::Run()
 				ScheduleClear();
 				ScheduleOnInterval(1000000 / param_schd_rate, 1000000 / param_schd_rate);
 			}
+		}
+
+		if (pca9685->registers_check() != PX4_OK) {
+			PX4_ERR("PCA9685 in unconsistent state, will reconfigure");
+			perf_count(_registers_invalid);
+			_state = STATE::CONFIGURE;
+			ScheduleNow();
+			break;
 		}
 
 		_mixing_output.updateSubscriptions(false);

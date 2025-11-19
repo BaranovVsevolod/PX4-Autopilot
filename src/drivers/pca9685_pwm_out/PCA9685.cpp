@@ -61,7 +61,8 @@ int PCA9685::init()
 	return ret;
 }
 
-int PCA9685::configure(){
+int PCA9685::configure()
+{
 	uint8_t buf[2] = {};
 
 	buf[0] = PCA9685_REG_MODE1;
@@ -78,24 +79,27 @@ int PCA9685::configure(){
 	ret |= transfer(buf, 2, nullptr, 0);
 
 	if (OK != ret) {
-		PX4_ERR("PCA9685 configure fail: transfer returned %d", ret);
+		PX4_ERR("PCA9685 configure fail");
 	}
 
 	return ret;
 }
 
-int PCA9685::sanity_check(){
+int PCA9685::registers_check()
+{
 	uint8_t send_buf = PCA9685_REG_MODE1;
 	uint8_t recv_buf;
 
 	int ret = transfer(&send_buf, 1, &recv_buf, 1);
-	if (OK != ret || recv_buf != PCA9685_DEFAULT_MODE1_CFG ) {
+
+	if (OK != ret || recv_buf != PCA9685_DEFAULT_MODE1_CFG) {
 		return PX4_ERROR;
 	}
 
 	send_buf = PCA9685_REG_MODE2;
 	ret = transfer(&send_buf, 1, &recv_buf, 1);
-	if (OK != ret || recv_buf != PCA9685_DEFAULT_MODE2_CFG ) {
+
+	if (OK != ret || recv_buf != PCA9685_DEFAULT_MODE2_CFG) {
 		return PX4_ERROR;
 	}
 
@@ -156,32 +160,26 @@ int PCA9685::wake()
 
 	int ret = transfer(&send_buf[0], 1, &recv_buf, 1);
 
-	if(recv_buf & (1u << 7)){ // Check if reset bit is set
-		send_buf[1] = recv_buf & ~(PCA9685_MODE1_SLEEP_MASK | PCA9685_MODE1_RESTART_MASK); // Clear sleep bit and restart bit
-		ret |= transfer(&send_buf[0], 2, nullptr, 0);
-		px4_usleep(500); // wait for oscillator to stabilize
-		send_buf[1] |= 0x80; // Set restart bit
-		ret |= transfer(&send_buf[0], 2, nullptr, 0);
-
-	}else{
+	if (recv_buf & PCA9685_MODE1_RESTART_MASK) { // Check if reset bit is set
 		send_buf[1] = recv_buf & ~PCA9685_MODE1_SLEEP_MASK; // Clear sleep bit
 		ret |= transfer(&send_buf[0], 2, nullptr, 0);
+		px4_usleep(500); // wait for oscillator to stabilize
+		send_buf[1] |= PCA9685_MODE1_RESTART_MASK; // Set restart bit
+		ret |= transfer(&send_buf[0], 2, nullptr, 0);
+
+	} else {
+		send_buf[1] = recv_buf & ~PCA9685_MODE1_SLEEP_MASK; // Clear sleep bit
+		ret |= transfer(&send_buf[0], 2, nullptr, 0);
+		px4_usleep(500); // wait for oscillator to stabilize
 	}
 
 	ret |= transfer(&send_buf[0], 1, &recv_buf, 1);
 
-	if(ret != PX4_OK ||recv_buf & (1u << 7) || recv_buf & (1u << 4)){
-		PX4_ERR("WAKE FAILED: Ret: %d MODE1 REG after wake: %d \n", ret, recv_buf);
+	if (ret != PX4_OK || recv_buf & PCA9685_MODE1_RESTART_MASK || recv_buf & PCA9685_MODE1_SLEEP_MASK) {
+		PX4_ERR("PCA9685 wake failed: Ret: %d MODE1 REG after wake: %d \n", ret, recv_buf);
 		return PX4_ERROR;
 	}
 
-	return ret;
-}
-
-int PCA9685::reset()
-{
-	uint8_t buf[2] = { 0x00, 0x06 };
-	int ret = transfer(buf, 2, nullptr, 0);
 	return ret;
 }
 
