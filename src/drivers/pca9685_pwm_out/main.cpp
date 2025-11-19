@@ -183,92 +183,93 @@ void PCA9685Wrapper::Run()
 		return;
 	}
 
-	int ret;
-
 	switch (_state) {
-	case STATE::CONFIGURE:
-		ret |= pca9685->configure();
+	case STATE::CONFIGURE: {
+			int ret = pca9685->configure();
 
-		if (ret == PX4_OK) {
-			_state = STATE::INIT;
+			if (ret == PX4_OK) {
+				_state = STATE::INIT;
 
-		} else {
-			perf_count(_comms_errors);
-		}
-
-		ScheduleNow();
-		break;
-
-	case STATE::INIT:
-		updateParams();
-		ret = pca9685->updateFreq(param_pwm_freq);
-		ret |= pca9685->wake();
-
-		if (ret == PX4_OK) {
-			previous_pwm_freq = param_pwm_freq;
-			previous_schd_rate = param_schd_rate;
-			_state = STATE::RUNNING;
-			ScheduleOnInterval(1000000 / param_schd_rate, 0);
-
-		} else {
-			perf_count(_comms_errors);
-			_state = STATE::CONFIGURE;
-			ScheduleNow();
-		}
-
-		break;
-
-	case STATE::RUNNING:
-		perf_begin(_cycle_perf);
-		_mixing_output.update();
-
-		// check for parameter updates
-		if (_parameter_update_sub.updated()) {
-			// clear update
-			parameter_update_s pupdate;
-			_parameter_update_sub.copy(&pupdate);
-
-			// update parameters from storage
-			updateParams();
-
-			// apply param updates
-			if ((float)fabs(previous_pwm_freq - param_pwm_freq) > 0.01f) {
-
-				ScheduleClear();
-				ret = pca9685->sleep();
-				ret |= pca9685->updateFreq(param_pwm_freq);
-				ret |= pca9685->wake();
-
-				if (ret != PX4_OK) {
-					perf_count(_comms_errors);
-				}
-
-				// update of PWM freq will always trigger scheduling change
-				previous_schd_rate = param_schd_rate;
-				previous_pwm_freq = param_pwm_freq;
-
-				ScheduleNow();
-
-			} else if ((float)fabs(previous_schd_rate - param_schd_rate) > 0.01f) {
-				// case when PWM freq not changed but scheduling rate does
-				previous_schd_rate = param_schd_rate;
-				ScheduleClear();
-				ScheduleOnInterval(1000000 / param_schd_rate, 1000000 / param_schd_rate);
+			} else {
+				perf_count(_comms_errors);
 			}
-		}
 
-		if (pca9685->registers_check() != PX4_OK) {
-			PX4_ERR("PCA9685 in unconsistent state, will reconfigure");
-			perf_count(_registers_invalid);
-			_state = STATE::CONFIGURE;
 			ScheduleNow();
 			break;
 		}
 
-		_mixing_output.updateSubscriptions(false);
+	case STATE::INIT: {
+			updateParams();
+			int ret = pca9685->updateFreq(param_pwm_freq);
+			ret |= pca9685->wake();
 
-		perf_end(_cycle_perf);
-		break;
+			if (ret == PX4_OK) {
+				previous_pwm_freq = param_pwm_freq;
+				previous_schd_rate = param_schd_rate;
+				_state = STATE::RUNNING;
+				ScheduleOnInterval(1000000 / param_schd_rate, 0);
+
+			} else {
+				perf_count(_comms_errors);
+				_state = STATE::CONFIGURE;
+				ScheduleNow();
+			}
+
+			break;
+		}
+
+	case STATE::RUNNING: {
+			perf_begin(_cycle_perf);
+			_mixing_output.update();
+
+			// check for parameter updates
+			if (_parameter_update_sub.updated()) {
+				// clear update
+				parameter_update_s pupdate;
+				_parameter_update_sub.copy(&pupdate);
+
+				// update parameters from storage
+				updateParams();
+
+				// apply param updates
+				if ((float)fabs(previous_pwm_freq - param_pwm_freq) > 0.01f) {
+
+					ScheduleClear();
+					int ret = pca9685->sleep();
+					ret |= pca9685->updateFreq(param_pwm_freq);
+					ret |= pca9685->wake();
+
+					if (ret != PX4_OK) {
+						perf_count(_comms_errors);
+					}
+
+					// update of PWM freq will always trigger scheduling change
+					previous_schd_rate = param_schd_rate;
+					previous_pwm_freq = param_pwm_freq;
+
+					ScheduleNow();
+
+				} else if ((float)fabs(previous_schd_rate - param_schd_rate) > 0.01f) {
+					// case when PWM freq not changed but scheduling rate does
+					previous_schd_rate = param_schd_rate;
+					ScheduleClear();
+					ScheduleOnInterval(1000000 / param_schd_rate, 1000000 / param_schd_rate);
+				}
+			}
+
+			if (pca9685->registers_check() != PX4_OK) {
+				PX4_ERR("PCA9685 in inconsistent state, will reconfigure");
+				perf_count(_registers_invalid);
+				_state = STATE::CONFIGURE;
+				ScheduleNow();
+				break;
+			}
+
+			_mixing_output.updateSubscriptions(false);
+
+			perf_end(_cycle_perf);
+			break;
+		}
 	}
 }
 
